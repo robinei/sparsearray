@@ -8,7 +8,7 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 
 public final class SparseArray<T> {
-    private static final int MIN_CAPACITY = 16;
+    private static final int MIN_CAPACITY = 16; // must be power of 2
     private static final float MAX_LOAD_FACTOR = 0.85f;
 
     private boolean frozen;
@@ -30,8 +30,10 @@ public final class SparseArray<T> {
         if ((float)other.size / neededCapacity > MAX_LOAD_FACTOR) {
             neededCapacity *= 2;
         }
+        size = other.size;
+        hashKeys = other.hashKeys;
+        values = other.values;
         resize(neededCapacity);
-        putAll(this, other.size, other.hashKeys, other.values);
     }
 
     @Override
@@ -47,9 +49,9 @@ public final class SparseArray<T> {
         for (int i = 0; found < size; ++i) {
             final long hk = hashKeys[i];
             if ((int)(hk >> 32) != 0) {
-                final Object a = get((int)hk);
-                final Object b = other.get((int)hk);
-                if (!a.equals(b)) {
+                final int a = find(hk);
+                final int b = other.find(hk);
+                if (b < 0 || !values[a].equals(values[b])) {
                     return false;
                 }
                 ++found;
@@ -118,11 +120,7 @@ public final class SparseArray<T> {
     }
 
     public T get(final int key) {
-        final int index = find(calcHashKey(key));
-        if (index >= 0) {
-            return values[index];
-        }
-        return null;
+        return get(key, null);
     }
 
     public T get(final int key, final T defaultValue) {
@@ -152,6 +150,9 @@ public final class SparseArray<T> {
         if (frozen) {
             throw new UnsupportedOperationException();
         }
+        if (value == null) {
+            throw new IllegalArgumentException("value is null");
+        }
         if ((float)size / capacity > MAX_LOAD_FACTOR) {
             resize(capacity * 2);
         }
@@ -168,24 +169,20 @@ public final class SparseArray<T> {
         }
 
         for (int i = 0; i < capacity; ++i) {
-            final int currIndex = (index + i) & (capacity - 1);
-            final int nextIndex = (index + i + 1) & (capacity - 1);
+            final int curr = (index + i) & (capacity - 1);
+            final int next = (index + i + 1) & (capacity - 1);
 
-            final int nextHash = (int)(hashKeys[nextIndex] >> 32);
-            if (nextHash == 0 || distToStart(nextHash, nextIndex) == 0) {
-                hashKeys[currIndex] = 0;
-                values[currIndex] = null;
+            final int h = (int)(hashKeys[next] >> 32);
+            if (h == 0 || distToHome(h, next) == 0) {
+                hashKeys[curr] = 0;
+                values[curr] = null;
                 --size;
                 return true;
             }
 
-            // swap currIndex and nextIndex
-            final long tempHK = hashKeys[currIndex];
-            final T tempVal = values[currIndex];
-            hashKeys[currIndex] = hashKeys[nextIndex];
-            values[currIndex] = values[nextIndex];
-            hashKeys[nextIndex] = tempHK;
-            values[nextIndex] = tempVal;
+            // shift back next value closer to its home slot
+            hashKeys[curr] = hashKeys[next];
+            values[curr] = values[next];
         }
 
         throw new RuntimeException("control flow should not get here");
@@ -193,7 +190,7 @@ public final class SparseArray<T> {
 
     private void put(long hashKey, T value) {
         final int startIndex = (int)(hashKey >> 32) & (capacity - 1);
-        int probe = 0;
+        int probe = 0; // probe distance from home slot
 
         for (int i = 0; i < capacity; ++i, ++probe) {
             final int index = (startIndex + i) & (capacity - 1);
@@ -212,9 +209,10 @@ public final class SparseArray<T> {
                 return;
             }
 
-            final int p = distToStart(h, index);
-            if (probe > p) {
-                probe = p;
+            final int d = distToHome(h, index);
+            if (probe > d) {
+                // if we are farther from home than the encountered value, then we take its place
+                probe = d;
                 long tempHK = hashKeys[index];
                 T tempVal = values[index];
                 hashKeys[index] = hashKey;
@@ -228,11 +226,7 @@ public final class SparseArray<T> {
     }
 
     private int find(final long hashKey) {
-        if (size == 0) {
-            return -1;
-        }
         final int startIndex = (int)(hashKey >> 32) & (capacity - 1);
-        int probe = 0;
 
         for (int i = 0; i < capacity; ++i) {
             final int index = (startIndex + i) & (capacity - 1);
@@ -243,12 +237,17 @@ public final class SparseArray<T> {
             }
 
             final int h = (int)(hk >> 32);
-            if (h != 0) {
-                probe = distToStart(h, index);
+            if (h == 0) {
+                // if we encounter an empty slow we give up, since backward shifting on delete
+                // will leave no empty slots keeping a value away from its home slot
+                return -1;
             }
 
-            if (i > probe) {
-                break;
+            int d = distToHome(h, index);
+            if (i > d) {
+                // if current probe distance is farther from home than that of encountered value,
+                // then we give up, since our value would have taken its place had it been present
+                return -1;
             }
         }
 
@@ -270,21 +269,17 @@ public final class SparseArray<T> {
         hashKeys = new long[newCapacity];
         values = (T[]) new Object[newCapacity]; // unchecked cast
 
-        putAll(this, oldSize, oldHashKeys, oldValues);
-    }
-
-    private static<T> void putAll(final SparseArray<T> arr, final int size, final long[] hashKeys, final T[] values) {
         int found = 0;
-        for (int i = 0; found < size; ++i) {
-            final long hk = hashKeys[i];
+        for (int i = 0; found < oldSize; ++i) {
+            final long hk = oldHashKeys[i];
             if ((int)(hk >> 32) != 0) {
-                arr.put(hk, values[i]);
+                put(hk, oldValues[i]);
                 ++found;
             }
         }
     }
 
-    private int distToStart(int hash, int indexStored) {
+    private int distToHome(int hash, int indexStored) {
         final int startIndex = hash & (capacity - 1);
         if (startIndex <= indexStored) {
             return indexStored - startIndex;
@@ -295,7 +290,7 @@ public final class SparseArray<T> {
     private static long calcHashKey(int key) {
         int hash = smear(key);
         if (hash == 0) {
-            hash = 1;
+            hash = 1; // don't allow hash of 0, so we can use that to distinguish lack of value
         }
         return ((long)hash << 32) | (key & 0xFFFFFFFFL);
     }
@@ -317,6 +312,7 @@ public final class SparseArray<T> {
         if (x < MIN_CAPACITY) {
             return MIN_CAPACITY;
         }
+        // next higher power of two:
         x = x - 1;
         x |= x >> 1;
         x |= x >> 2;
@@ -410,6 +406,7 @@ public final class SparseArray<T> {
         }
         for (int i = 0; i < COUNT; ++i) {
             assert sparseArray.containsKey(i);
+            assert sparseArray.containsKey(i ^ 13);
         }
         System.out.println("SparseArray: " + ((System.currentTimeMillis() - start2) / 1000.0));
 
@@ -420,6 +417,7 @@ public final class SparseArray<T> {
         }
         for (int i = 0; i < COUNT; ++i) {
             assert hashMap.containsKey(i);
+            assert hashMap.containsKey(i ^ 13);
         }
         System.out.println("HashMap: " + ((System.currentTimeMillis() - start1) / 1000.0));
     }
