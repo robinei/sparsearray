@@ -49,9 +49,8 @@ public final class SparseArray<T> {
         for (int i = 0; found < size; ++i) {
             final long kh = keyHashes[i];
             if ((int)kh != 0) {
-                final int a = find(kh);
-                final int b = other.find(kh);
-                if (b < 0 || !values[a].equals(values[b])) {
+                final int j = other.find(kh);
+                if (j < 0 || !values[i].equals(other.values[j])) {
                     return false;
                 }
                 ++found;
